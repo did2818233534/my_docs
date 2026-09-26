@@ -1,10 +1,10 @@
 # Ubuntu 24.04 顶栏中国节假日日历复现指南
 
-记录日期：2026-09-23。适用环境：Ubuntu 24.04、GNOME Shell 46。本文只记录本次对话中与日历有关的配置，不包含 Webcamoid。
+记录日期：2026-09-23；更新日期：2026-09-26。适用环境：Ubuntu 24.04、GNOME Shell 46。本文只记录本次对话中与日历有关的配置，不包含 Webcamoid。
 
 ## 最终效果与组成
 
-点击顶栏时间后，月历中的法定放假日显示「休」和淡蓝色方格，调休补班日显示「班」和淡红色方格。方格为 6px 小圆角，相邻方格有适度间隙；农历和节日名称仍显示，原有字号、字重不变。具体颜色是扩展样式的手工修改，并非扩展设置界面的内置主题。
+点击顶栏时间后，月历中的法定放假日显示「休」和淡蓝色方格，调休补班日显示「班」和淡红色方格。方格为 6px 小圆角，相邻方格有适度间隙；「今天」的蓝色背景和选中日期的蓝色边框也改为 6px 圆角方形。农历和节日名称仍显示，原有字号、字重不变。具体颜色和圆角是扩展样式的手工修改，并非扩展设置界面的内置主题。
 
 这个效果由两套**独立**数据组成：
 
@@ -76,6 +76,7 @@ chmod 600 "$HOME/.config/evolution/sources/china-holidays-shuyz.source"
 curl -LfsS 'https://extensions.gnome.org/download-extension/chinese-calendar@tigertall.shell-extension.zip?version_tag=75318' -o /tmp/chinese-calendar-1.7.zip
 sudo install -d -m 755 /opt/chinese-calendar
 sudo unzip -oq /tmp/chinese-calendar-1.7.zip -d /opt/chinese-calendar
+sudo chmod -R a+rX /opt/chinese-calendar
 sudo glib-compile-schemas --strict /opt/chinese-calendar/schemas
 mkdir -p "$HOME/.local/share/gnome-shell/extensions"
 ln -s /opt/chinese-calendar "$HOME/.local/share/gnome-shell/extensions/chinese-calendar@tigertall"
@@ -84,14 +85,16 @@ rm /tmp/chinese-calendar-1.7.zip
 
 下载的 1.7 版压缩包在本次安装时的 SHA-256：`9a1e57e210df05d4d328a858e88d80c4fb9e8e450e40eecd9c985497941d4358`。如新电脑上已有同名扩展目录，先备份它，再创建指向 `/opt` 的链接。
 
+`chmod -R a+rX` 是必需的：曾因 `/opt/chinese-calendar/metadata.json` 权限为 `600`，重启后 GNOME Shell 无法读取扩展，定制效果随之消失。
+
 ### 4. 加入本次定制的背景、圆角和间隙
 
-**只追加下面的 CSS**，无需改扩展的 JavaScript。它保留原有「休／班」文字大小和字重。
+**只追加下面的 CSS**，无需改扩展的 JavaScript。它保留原有「休／班」文字大小和字重，并将「今天」及选中日期改为圆角方形。
 
 ```bash
 cat <<'CSS' | sudo tee -a /opt/chinese-calendar/stylesheet.css >/dev/null
 
-/* 本机定制：休/班方格的背景、圆角与间隙 */
+/* 本机定制：休/班方格的背景、圆角与间隙，以及今天/选中日期的圆角 */
 .lunar-badge {
     border-radius: 6px;
     margin: 2px;
@@ -102,10 +105,14 @@ cat <<'CSS' | sudo tee -a /opt/chinese-calendar/stylesheet.css >/dev/null
 .lunar-badge-work {
     background-color: rgba(232, 92, 105, 0.24);
 }
+.lunar-calendar .calendar-day {
+    border-radius: 6px !important;
+}
 CSS
 ```
 
 蓝色对应「休」，红色对应「班」；`0.22` 和 `0.24` 是背景不透明度。`margin: 2px` 让相邻方格之间保留不大的间隙。
+最后一条规则让「今天」和选中日期使用同样的 6px 圆角，不改变它们原有的蓝色填充或边框。
 
 ### 5. 启用扩展并更新休班数据
 
@@ -129,12 +136,16 @@ gnome-extensions prefs chinese-calendar@tigertall
 - **9 月 25–27 日**：中秋假期，应显示「休」和淡蓝色背景。
 - **10 月 1–7 日**：国庆假期，也应显示「休」和淡蓝色背景。
 
+再选中一个非今天的日期，检查蓝色选中边框为圆角方形；回到今天，检查蓝色背景也为圆角方形。
+
 若已改 CSS 而画面尚未刷新，可执行：
 
 ```bash
 gnome-extensions disable chinese-calendar@tigertall
 gnome-extensions enable chinese-calendar@tigertall
 ```
+
+如果重启后扩展消失，先检查 `/opt/chinese-calendar/metadata.json` 是否可供普通用户读取。不可读取时执行 `sudo chmod -R a+rX /opt/chinese-calendar`，然后注销并重新登录桌面会话，再运行 `gnome-extensions info chinese-calendar@tigertall` 检查是否启用。
 
 GNOME 45 及以后会缓存扩展的 JavaScript；若修改的是 `extension.js` 而不是本指南的 CSS，通常需要注销并重新登录，单纯关闭再打开扩展不足以加载新代码。本次最终方案**没有修改 JavaScript**。
 
@@ -146,4 +157,4 @@ GNOME 45 及以后会缓存扩展的 JavaScript；若修改的是 `extension.js`
 - 在 `gnome-extensions prefs chinese-calendar@tigertall` 中再次点「更新数据」，让扩展刷新「休／班」标记。不要假定它会读取 ICS 订阅。
 - 安排若有疑问，以[国务院办公厅的正式放假通知](https://www.gov.cn/zhengce/content/202511/content_7047090.htm)为准；此链接对应 2026 年安排，往后应查当年的通知。
 
-扩展更新可能覆盖手工 CSS。更新后若淡色背景消失，重新执行第 4 步即可。本文没有记录或保存任何管理员密码。
+扩展更新可能覆盖手工 CSS。更新后若淡色背景或今天、选中日期的圆角消失，重新执行第 4 步即可。本文没有记录或保存任何管理员密码。

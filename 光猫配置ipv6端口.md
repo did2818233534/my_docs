@@ -273,3 +273,17 @@ ip6tables -S input_firewall
 - MDM/save 持久配置讨论：https://github.com/jonirrings/xor/issues/28#issuecomment-2380405814
 
 最后一个讨论使用关闭整个防火墙的方法；本次没有采用，改用设备原生 FirewallException 精确放行 TCP 22。不要直接运行参考仓库脚本，它可能同时启用 FTP、改管理凭据或执行其他超出范围的操作。
+
+
+## 后续新增：游戏与预留端口（2026-09-29）
+
+同一 WANPPPConnection 下新增并启用原生 IPv6/TCP 例外：
+
+| 实例 | 名称 | 目标端口 |
+|---|---|---|
+| 2 | GAME8088_IPv6 | 8088 |
+| 3 | RESERVE18080_18089 | 18080–18089 |
+
+均不限制目标设备，已核对 forward_firewall 规则且 `qoecmd save` 返回成功。未做重启或外网端口实测。原生对象也会生成光猫本身的 INPUT 例外。临时 Telnet 已关闭并验证 23 端口拒绝连接，FTP 未开启。预留端口不占用端口，但任何内网设备在该范围运行服务均可能被外网访问。
+
+QQ 飞车静态页面运行在 TCP 8088，服务为用户级临时 systemd 单元 `qq-speed.service`；重启后不会自动恢复。停止命令：`systemctl --user stop qq-speed.service`。

@@ -1,0 +1,4 @@
+interface:
+  display_name: "任务完成提示音"
+  short_description: "配置并维护带响度补偿功能的 Codex 任务完成提示音"
+  default_prompt: "使用 $task-completion-chime 配置或调整 Codex 任务完成提示音，并验证钩子、音量补偿和播放环境。"

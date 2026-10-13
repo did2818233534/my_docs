@@ -1,6 +1,6 @@
 # Ubuntu 手机当摄像头：USB 连接、后台运行与画面方向
 
-记录日期：2026-10-12。适用环境：Ubuntu 桌面系统 + 支持 USB 调试的 Android 手机；本次验证环境为 Ubuntu 24.04.4 LTS（x86_64）、Android 15、scrcpy 5.0.1。
+记录日期：2026-10-12；更新日期：2026-10-13。适用环境：Ubuntu 桌面系统 + 支持 USB 调试的 Android 手机；本次验证环境为 Ubuntu 24.04.4 LTS（x86_64）、Android 15、scrcpy 5.0.1。
 
 本文用于换机后复现：手机通过 USB 提供真实摄像头画面，Ubuntu 应用通过标准摄像头接口使用。手动运行 `phone-webcam connect` 后在后台持续采集，不显示视频预览窗口；运行 `phone-webcam disconnect` 或拔掉 USB 后停止。**默认后置镜头、竖屏正向、不镜像，优先采集 1920×1080，输出 1080×1920。**
 
@@ -15,7 +15,7 @@
 1. 通过 USB 使用 Android 手机摄像头，让普通摄像头应用可以选择 Android USB Camera。
 2. 使用 phone-webcam connect 手动启动，phone-webcam disconnect 断开，status 查询状态，resolutions 查询当前镜头支持的分辨率编号。
 3. 启动后无预览窗口，后台持续运行，关闭启动它的终端不影响采集；拔掉 USB 后停止，不自动重连。
-4. 默认竖屏正向、不镜像；支持横屏、倒置、左右镜像及按编号选择分辨率。connect 必须检查实际收到的画面后报告成功。
+4. 默认竖屏正向、不镜像、自动对焦；支持横屏、倒置、左右镜像、按编号选择分辨率，以及查询、锁定、手动设置、恢复自动对焦。connect 必须检查实际收到的画面后报告成功。
 5. --help 和子命令帮助使用中文，表格按终端显示宽度对齐，正常内容适合 80 列终端。
 6. 如果我使用 BigCam，让这个手机来源出现在普通摄像头列表中，保留对 BigCam 自己的虚拟输出设备的过滤。
 
@@ -23,7 +23,7 @@
 1. 先检查实际 Ubuntu 版本、CPU 架构、内核、现有 ADB/scrcpy、USB 授权、V4L2 设备和 systemd 用户会话。不能假定用户名、手机序列号、分辨率编号、镜头 ID 或内核版本与记录相同。
 2. 软件本体安装到 /opt/scrcpy；默认装进主目录的软件改放 /opt/软件名。复用已有合适版本，不清空已有软件目录。
 3. 优先使用当前内核已有的签名 v4l2loopback 模块。确实缺少时才安装匹配的内核头文件和兼容模块；遇到 Secure Boot 或新内核问题，诊断原因，不默认关闭安全启动。
-4. 使用本文附录 A 的完整脚本。ADB 默认复用 scrcpy 静态包内的 /opt/scrcpy/adb；已有兼容 ADB 时也可调整常量。不要重启或杀死无关 ADB 会话。
+4. 使用本文附录 A 的完整脚本。对焦控制还依赖同仓库的 `phone-webcam-focus-server.patch`，先按第 4 节构建并安装定制的 scrcpy 手机端服务；只有脚本、没有手机端补丁时，对焦命令不能工作。ADB 默认复用 scrcpy 静态包内的 /opt/scrcpy/adb；已有兼容 ADB 时也可调整常量。不要重启或杀死无关 ADB 会话。
 5. 不添加开机启动、登录启动、USB 插入触发、永久启用的服务、自动重连或模块自动加载配置。只在 connect 时按需加载模块和创建临时用户服务。
 6. 写入前备份已有脚本和要修改的 BigCam 文件。若 /dev/video10 已属于其他设备，选择空闲编号并统一调整脚本，不能覆盖原设备。
 7. 切换分辨率或横竖屏前释放摄像头读取应用；应用仍占用且输出尺寸要改变时，报错并保留原连接。错误编号和冲突参数也不能破坏原连接。
@@ -48,6 +48,7 @@
 | 摄像头名称 | `Android USB Camera` |
 | 摄像头设备 | `/dev/video10`，`exclusive_caps=1` |
 | 后台服务 | 手动创建的临时用户服务 `phone-webcam.service`，`Restart=no` |
+| 对焦控制 | 默认自动；脚本与定制的 scrcpy 手机端服务配合，支持 `focus status/lock/set/auto` |
 | 默认连接 | 后置、1920×1080 采集、1080×1920 输出、请求 30 FPS、竖屏正向、不镜像 |
 | 停止方式 | 手动 `disconnect` 或 USB 断开；不自动重连 |
 | BigCam | 4.5.0，针对这个手机来源增加一项检测例外 |
@@ -65,7 +66,7 @@ Linux 使用 `v4l2loopback` 把采集到的画面接入摄像头接口。只给�
 
 本次曾尝试手机原生 USB UVC 功能：USB HAL 返回状态 4，随后回到 ADB；虽然系统存在 `com.android.DeviceAsWebcam`，仍未实现电脑直接识别手机为物理 UVC 摄像头。Root 并不能替代固件/内核支持，因此最终采用上述方案，**无需 Root**，也没有修改手机固件、SELinux 或 USB 系统属性。
 
-本文只传视频，不传手机麦克风，不录制文件。手动断开后，`/dev/video10` 节点可能仍存在，但不再持续产生手机画面；这不表示还在连接。正常桌面会话中关闭终端不会断开，注销/关机不承诺继续采集。拔掉再插回手机后，需要重新运行 `connect`。
+本文只传视频，不传手机麦克风，不录制文件。手动断开后，`/dev/video10` 节点可能仍存在，但不再持续产生手机画面；这不表示还在连接。正常桌面会话中关闭终端不会断开，注销/关机不承诺继续采集。拔掉再插回手机后，需要重新运行 `connect`。手机无需 Root；本次 Redmi K70 Pro 虽已 Root，但摄像头转接和对焦控制没有使用 Root 权限。
 
 ## 1. 检查环境和 USB 授权
 
@@ -165,9 +166,17 @@ sudo modprobe v4l2loopback devices=1 video_nr=10 \
 
 它不是开机配置。**不创建** `/etc/modules-load.d/`、udev 热插拔、桌面自启动或永久服务文件；如果安装包新增了自动加载配置，应查明来源并按本次“只手动启动”的目标调整，保留原配置备份。
 
-## 4. 部署完整 phone-webcam 脚本
+## 4. 部署 phone-webcam 脚本和对焦服务
 
-附录 A 给出了完整源码，不依赖本机临时文件。可将其保存为 `/opt/scrcpy/phone-webcam`，权限 `755`，再创建入口链接。
+附录 A 给出了当前 CLI 的完整源码。可将其保存为 `/opt/scrcpy/phone-webcam`，权限 `755`，再创建入口链接。基础摄像头转接使用 scrcpy 5.0.1；**对焦控制额外依赖定制的 scrcpy 手机端服务**。同仓库的 [`phone-webcam-focus-server.patch`](phone-webcam-focus-server.patch) 是基于 scrcpy 5.0.1 的 `CameraCapture.java` 改动，包含 Camera2 对焦控制和实际镜头位置反馈；不能只更新 Python 脚本便认为对焦已可用。
+
+在另一台机器复现对焦功能时，应从 scrcpy 5.0.1 源码按官方构建说明准备 Android 构建环境，在源码根目录应用该补丁并构建手机端 `scrcpy-server`，先备份原 `/opt/scrcpy/scrcpy-server`，再安装构建产物。补丁只适用于相符的源码版本；若 `git apply --check` 失败，应检查版本，不要强行套用。可先检查：
+
+```bash
+git apply --check /path/to/my_docs/phone-webcam-focus-server.patch
+```
+
+服务文件是 scrcpy 启动时传到手机的组件；仅更换电脑端的 `/opt/scrcpy/scrcpy` 不会获得对焦功能。官方源码及构建方法见 [scrcpy 项目](https://github.com/Genymobile/scrcpy/tree/v5.0.1)。本机已安装并实测定制服务，未把编译后的二进制放入本文仓库。
 
 下面的块会从**当前目录中的本文文件**提取附录 A，先检查 Python 语法，再备份并安装。换机器后先切换到本文所在目录；若文档放在其他位置，修改 `webcam_doc`。
 
@@ -280,6 +289,21 @@ phone-webcam connect --rotate 270 --mirror
 实现使用 `--capture-orientation`，变换发生在手机发送的视频上，因此其他应用实际读取的画面也会改变。脚本把镜像定义为“**旋转完成后，将最终画面左右翻转**”，并转换为 scrcpy 对应的参数组合。不要用只影响客户端显示的方向参数替代。参见 [scrcpy 方向参数说明](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/video.md#orientation)。不同手机摄像头的传感器安装方向可能不同，参考 [Android 摄像头方向说明](https://developer.android.com/media/camera/camera2/camera-preview#camera_orientation)。
 
 BigCam 或会议软件可能另有“镜像预览”设置。要判断传给其他程序的真实左右方向，应关闭应用的额外镜像，并用文字或明显不对称的物体检查。
+
+### 自动对焦与手动对焦
+
+默认使用当前自动对焦方案。摄像头已连接且安装了第 4 节的定制手机端服务后，可运行：
+
+```bash
+phone-webcam focus status   # 查看模式与实际镜头位置
+phone-webcam focus lock     # 将当前自动对焦位置固定住
+phone-webcam focus set 120  # 手动请求对焦位置
+phone-webcam focus auto     # 恢复默认自动对焦
+```
+
+`set` 接受 0–200 的百分比，0 对应远处，数值越大越靠近镜头。百分比以手机报告的对焦距离上限为 100% 计算，**不是画面的变焦倍数**。状态同时区分“设定值”和手机返回的“实际位置”。超出镜头可达范围时，即使命令被接受，也可能停在较低的实际位置。
+
+本机后置镜头实测：自动对焦曾显示超过 100%；手动设为 120% 时，手机回报约 128.2%；设为 200% 时仍约 128.2%。这只说明这台手机当前镜头与固件的实测行为，不能保证其他镜头达到同样位置。要回到原来的自动对焦，运行 `phone-webcam focus auto`。
 
 ## 6. BigCam 选择摄像头和普通摄像头分类
 
@@ -406,6 +430,10 @@ journalctl --user -u phone-webcam.service -b --no-pager -n 60
 
 scrcpy 默认启动界面，直接前台运行也会占着终端。本次 5.0.1 只加 `--no-video-playback` 仍出现图标窗口，最终使用 `--no-window` 完全关闭界面；临时用户服务负责脱离终端。不要用 `--no-video`，那会关闭视频传输本身。
 
+### 为什么自动对焦会显示 120%，手动输入 200% 却达不到 200%？
+
+这个数字是镜头对焦距离相对于手机报告范围的百分比，不是画面放大倍数。手机的实际镜头反馈可能超过报告的 100% 上限；本机手动请求 120% 和 200% 后均回报约 128.2%。因此 `200` 是命令允许的输入上限，不代表镜头必然能达到 200%。
+
 ### 手机 Root 了，为什么仍不是物理摄像头？
 
 原生 UVC 需要手机厂商系统和 USB gadget 支持。本文实测的固件没有成功启用该路径；Root 状态不能保证这些能力。BigCam 将手机来源显示为普通摄像头不会改变 V4L2 驱动。若某个软件要求硬件 UVC 并检查驱动，本文不能保证兼容。
@@ -448,7 +476,7 @@ scrcpy 默认启动界面，直接前台运行也会占着终端。本次 5.0.1 
 phone-webcam disconnect
 ```
 
-本次增加方向参数前的脚本备份是 `/opt/scrcpy/phone-webcam.bak-before-orientation`；换机部署块会生成带时间戳的备份。需要恢复时先确认备份内容，再将其安装回 `/opt/scrcpy/phone-webcam`。BigCam 也应恢复实际记录的对应备份，重启应用加载。
+本机保留了增加方向、对焦、扩展手动对焦范围前的脚本备份；换机部署块会生成带时间戳的备份。需要恢复时先确认备份内容，再将其安装回 `/opt/scrcpy/phone-webcam`。定制手机端服务也应先备份后安装，恢复时须与脚本版本配套。BigCam 应恢复实际记录的对应备份，重启应用加载。
 
 如果要移除本文 CLI，确认命令入口仍指向本脚本后删除：
 
@@ -474,10 +502,11 @@ scrcpy、ADB 或 `v4l2loopback` 可能被其他用途使用，不因为移除 CL
 | BigCam 检测及读帧 | 已识别手机为普通 V4L2 来源；后端收到实际帧 |
 | 帮助排版 | 按显示列宽对齐；全局和连接帮助正常内容在 80 列内 |
 | 无 GUI、手动后台服务 | 配置与运行进程已检查，使用 `--no-window`，无自动启用的单元 |
+| 对焦控制 | 定制手机端服务与脚本已实测；默认自动、手动设定、实际位置反馈和恢复自动可用；输入 120%、200% 后实际约 128.2% |
 | 新机器实际拔线/关闭终端、长期使用 | 换机后仍需按第 7 节实际验收，不能用本机结果替代 |
 | 最高分辨率、锁屏省电、所有应用兼容性 | 未全部实测，不作保证 |
 
-附录源码与最终安装脚本保持一致。再次部署后应以新机器实际检查为准。
+附录源码与当前安装脚本保持一致。对焦功能还须安装同仓库补丁构建的手机端服务；再次部署后应以新机器实际检查为准。
 
 ## 参考资料
 
@@ -486,6 +515,7 @@ scrcpy、ADB 或 `v4l2loopback` 可能被其他用途使用，不因为移除 CL
 - [scrcpy V4L2 输出说明](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/v4l2.md)
 - [v4l2loopback 官方项目](https://github.com/v4l2loopback/v4l2loopback)
 - [systemd-run 临时服务说明](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html)
+- [Android Camera2 `LENS_FOCUS_DISTANCE` 说明](https://developer.android.com/reference/android/hardware/camera2/CaptureRequest#LENS_FOCUS_DISTANCE)
 
 ## 附录 A：完整脚本
 
@@ -500,6 +530,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -681,6 +712,71 @@ def stop():
             raise CameraError("断开失败，请重试。")
 
 
+def focus_state(serial, camera_id):
+    path = f"/data/local/tmp/scrcpy-focus-state-{camera_id}"
+    result = run([ADB, "-s", serial, "shell", "cat", path], timeout=4)
+    if result.returncode != 0:
+        raise CameraError("读取对焦状态失败，请确认摄像头仍在运行。")
+    fields = result.stdout.strip().split()
+    if len(fields) < 3 or fields[1] not in ("auto", "manual") or (fields[1] == "manual" and len(fields) < 4):
+        raise CameraError("手机端尚未提供对焦控制，请重新连接摄像头。")
+    return fields
+
+
+def focus_actual_percent(fields, maximum):
+    actual = next((field[7:] for field in fields if field.startswith("actual=")), None)
+    if actual is None or maximum <= 0:
+        return None
+    try:
+        return 100 * float(actual) / maximum
+    except ValueError:
+        return None
+
+
+def focus(mode, percent=None):
+    if not active():
+        raise CameraError("摄像头尚未连接，请先运行 phone-webcam connect。")
+    _, options = current_config()
+    serial = options.get("serial", "")
+    camera_id = options.get("camera-id", "")
+    if not serial or not re.fullmatch(r"[a-zA-Z0-9_-]+", camera_id):
+        raise CameraError("无法识别当前手机或摄像头。")
+    fields = focus_state(serial, camera_id)
+    if mode == "status":
+        maximum = float(fields[2] if fields[1] == "auto" else fields[3])
+        actual = focus_actual_percent(fields, maximum)
+        if fields[1] == "auto":
+            print(f"对焦：自动，当前镜头位置约 {actual:.1f}%。" if actual is not None else "对焦：自动。")
+        else:
+            requested = 100 * float(fields[2]) / maximum if maximum > 0 else 0
+            detail = f"；镜头实际约 {actual:.1f}%" if actual is not None else ""
+            print(f"对焦：固定，设定 {requested:.1f}%{detail}（0 为远处，数值越大越近）。")
+        return
+    nonce = secrets.token_hex(6)
+    value = f" {percent:g}" if percent is not None else ""
+    command = f"{nonce} {mode}{value}"
+    path = f"/data/local/tmp/scrcpy-focus-command-{camera_id}"
+    result = run([ADB, "-s", serial, "shell", f"printf '%s\\n' '{command}' > {path}"], timeout=4)
+    if result.returncode != 0:
+        raise CameraError("发送对焦命令失败，请检查 USB 连接。")
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        result = run([ADB, "-s", serial, "shell", "cat", f"/data/local/tmp/scrcpy-focus-state-{camera_id}"], timeout=2)
+        reply = result.stdout.strip().split()
+        if reply and reply[0] == nonce:
+            if len(reply) > 1 and reply[1] == "error":
+                reason = reply[2] if len(reply) > 2 else "unknown"
+                messages = {"fixed-lens": "此镜头没有可调焦马达。",
+                            "no-focus-result": "尚未取得当前自动对焦位置，请稍等再试。",
+                            "camera-rejected": "摄像头拒绝了对焦设置。"}
+                raise CameraError(messages.get(reason, "对焦命令无效：" + reason))
+            time.sleep(0.7)
+            focus("status")
+            return
+        time.sleep(0.15)
+    raise CameraError("对焦命令超时，请检查手机端摄像头是否仍在运行。")
+
+
 def ready(expected):
     deadline = time.monotonic() + 12
     while time.monotonic() < deadline and active():
@@ -719,7 +815,7 @@ def connect(facing, requested_index, rotation, mirror):
                        and options.get("capture-orientation", "0") == transform)
 
     if not same_connection:
-        if Path(VIDEO).exists() and dimensions() != output_size:
+        if was_active and Path(VIDEO).exists() and dimensions() != output_size:
             users = device_users(pid)
             if users:
                 raise CameraError("切换分辨率或横竖屏前，请先停止这些应用的摄像头预览：" + "、".join(users) + "。原连接已保留。")
@@ -767,6 +863,10 @@ def make_parser():
                                ("phone-webcam connect --upside-down", "竖屏倒置"),
                                ("phone-webcam connect --mirror", "竖屏正向、左右镜像"),
                                ("phone-webcam status", "查询当前连接状态"),
+                               ("phone-webcam focus status", "查看当前对焦模式"),
+                               ("phone-webcam focus lock", "锁定当前自动对焦位置"),
+                               ("phone-webcam focus set 120", "手动设置对焦位置，可输入 0 到 200"),
+                               ("phone-webcam focus auto", "恢复自动对焦"),
                                ("phone-webcam disconnect", "断开摄像头"),
                            ]) + "\n\n" + """连接会检查实际画面并报告结果；日志保留在后台，关闭终端不会断开。
 不添加自动启动；拔掉 USB 后停止。切换编号会重新连接。
@@ -789,6 +889,13 @@ def make_parser():
                             help="顺时针旋转；与 --orientation 二选一")
     commands.add_parser("disconnect", help="断开手机摄像头")
     commands.add_parser("status", help="查询当前连接状态和分辨率")
+    focus_parser = commands.add_parser("focus", help="查看或调整对焦，默认保持自动对焦")
+    focus_commands = focus_parser.add_subparsers(dest="focus_command", required=True, metavar="操作")
+    focus_commands.add_parser("status", help="查看当前对焦模式")
+    focus_commands.add_parser("lock", help="锁定当前自动对焦位置")
+    focus_commands.add_parser("auto", help="恢复自动对焦")
+    focus_set = focus_commands.add_parser("set", help="手动设置对焦位置，0 为远处；实际位置以手机反馈为准")
+    focus_set.add_argument("position", type=float, metavar="0-200", help="焦点位置百分比")
     return parser
 
 
@@ -814,6 +921,11 @@ def main():
             print(f"摄像头名称：{LABEL}；设备：{VIDEO}。")
         else:
             print("手机摄像头当前未连接。")
+    elif args.command == "focus":
+        if args.focus_command == "set" and (not math.isfinite(args.position) or not 0 <= args.position <= 200):
+            raise CameraError("对焦位置应为 0 到 200；0 是远处，超出镜头能力时会停在实际可达位置。")
+        focus("manual" if args.focus_command == "set" else args.focus_command,
+              args.position if args.focus_command == "set" else None)
     elif args.command == "resolutions":
         show_resolutions(args.camera or "back")
     else:

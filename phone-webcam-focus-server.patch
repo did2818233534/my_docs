@@ -1,0 +1,222 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/CameraCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/CameraCapture.java
+index fb52969..e13989a 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/CameraCapture.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/CameraCapture.java
+@@ -25,16 +25,24 @@ import android.hardware.camera2.CameraDevice;
+ import android.hardware.camera2.CameraManager;
+ import android.hardware.camera2.CaptureFailure;
+ import android.hardware.camera2.CaptureRequest;
++import android.hardware.camera2.TotalCaptureResult;
+ import android.hardware.camera2.params.OutputConfiguration;
+ import android.hardware.camera2.params.SessionConfiguration;
+ import android.hardware.camera2.params.StreamConfigurationMap;
+ import android.media.MediaCodec;
+ import android.os.Handler;
+ import android.os.HandlerThread;
++import android.os.FileObserver;
+ import android.util.Range;
+ import android.view.Surface;
+ 
++import java.io.BufferedReader;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
+ import java.io.IOException;
++import java.io.InputStreamReader;
++import java.nio.charset.StandardCharsets;
+ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.List;
+@@ -55,6 +63,7 @@ public class CameraCapture extends SurfaceCapture {
+     };
+ 
+     private static final float ZOOM_FACTOR = 1 + 1 / 16f;
++    private static final String FOCUS_DIR = "/data/local/tmp";
+ 
+     private final String explicitCameraId;
+     private final CameraFacing cameraFacing;
+@@ -89,6 +98,13 @@ public class CameraCapture extends SurfaceCapture {
+     private boolean started;
+     private CaptureRequest.Builder requestBuilder;
+     private CameraCaptureSession currentSession;
++    private FileObserver focusObserver;
++    private String focusCommandName;
++    private File focusStateFile;
++    private float maxFocusDiopters;
++    private Float lastFocusDiopters;
++    private Float publishedFocusDiopters;
++    private String focusStateText;
+ 
+     public CameraCapture(Options options) {
+         this.explicitCameraId = options.getCameraId();
+@@ -306,6 +322,8 @@ public class CameraCapture extends SurfaceCapture {
+                 try {
+                     CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
+                     zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
++                    Float minimumFocusDistance = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
++                    maxFocusDiopters = minimumFocusDistance != null ? minimumFocusDistance : 0;
+                 } catch (CameraAccessException e) {
+                     Ln.w("Could not get camera characteristics");
+                 }
+@@ -330,6 +348,7 @@ public class CameraCapture extends SurfaceCapture {
+                     CaptureRequest request = requestBuilder.build();
+                     setRepeatingRequest(session, request);
+                     currentSession = session;
++                    startFocusControl();
+                 } catch (CameraAccessException e) {
+                     Ln.e("Camera error", e);
+                     disconnected.set(true);
+@@ -357,6 +376,7 @@ public class CameraCapture extends SurfaceCapture {
+     public void stop() {
+         cameraHandler.post(() -> {
+             assertCameraThread();
++            stopFocusControl();
+             if (currentSession != null) {
+                 try {
+                     currentSession.stopRepeating();
+@@ -461,6 +481,15 @@ public class CameraCapture extends SurfaceCapture {
+             public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure) {
+                 Ln.w("Camera capture failed: frame " + failure.getFrameNumber());
+             }
++
++            @Override
++            public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
++                lastFocusDiopters = result.get(TotalCaptureResult.LENS_FOCUS_DISTANCE);
++                if (lastFocusDiopters != null && result.getFrameNumber() % 6 == 0
++                        && (publishedFocusDiopters == null || Math.abs(lastFocusDiopters - publishedFocusDiopters) > 0.05f)) {
++                    publishFocusState();
++                }
++            }
+         };
+ 
+         if (highSpeed) {
+@@ -477,6 +506,129 @@ public class CameraCapture extends SurfaceCapture {
+         return disconnected.get();
+     }
+ 
++    private void startFocusControl() {
++        assertCameraThread();
++        String safeCameraId = cameraId.replaceAll("[^a-zA-Z0-9_-]", "_");
++        focusCommandName = "scrcpy-focus-command-" + safeCameraId;
++        focusStateFile = new File(FOCUS_DIR, "scrcpy-focus-state-" + safeCameraId);
++        writeFocusState("startup auto " + maxFocusDiopters);
++        focusObserver = new FileObserver(FOCUS_DIR, FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
++            @Override
++            public void onEvent(int event, String path) {
++                if (focusCommandName.equals(path)) {
++                    cameraHandler.post(() -> processFocusCommand());
++                }
++            }
++        };
++        focusObserver.startWatching();
++    }
++
++    private void stopFocusControl() {
++        assertCameraThread();
++        if (focusObserver != null) {
++            focusObserver.stopWatching();
++            focusObserver = null;
++        }
++        if (focusStateFile != null) {
++            focusStateFile.delete();
++            focusStateFile = null;
++        }
++        focusStateText = null;
++        publishedFocusDiopters = null;
++        if (focusCommandName != null) {
++            new File(FOCUS_DIR, focusCommandName).delete();
++            focusCommandName = null;
++        }
++    }
++
++    private void writeFocusState(String text) {
++        focusStateText = text;
++        publishFocusState();
++    }
++
++    private void publishFocusState() {
++        if (focusStateFile == null) {
++            return;
++        }
++        try (FileOutputStream stream = new FileOutputStream(focusStateFile, false)) {
++            String actual = lastFocusDiopters != null ? " actual=" + lastFocusDiopters : "";
++            stream.write((focusStateText + actual + "\n").getBytes(StandardCharsets.US_ASCII));
++            publishedFocusDiopters = lastFocusDiopters;
++        } catch (IOException e) {
++            Ln.w("Could not write focus state: " + e.getMessage());
++        }
++    }
++
++    private void processFocusCommand() {
++        assertCameraThread();
++        if (currentSession == null || requestBuilder == null) {
++            return;
++        }
++        String command;
++        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
++                new FileInputStream(new File(FOCUS_DIR, focusCommandName)), StandardCharsets.US_ASCII))) {
++            command = reader.readLine();
++        } catch (IOException e) {
++            Ln.w("Could not read focus command: " + e.getMessage());
++            return;
++        }
++        if (command == null) {
++            return;
++        }
++        String[] fields = command.trim().split(" ");
++        if (fields.length < 2 || !fields[0].matches("[a-zA-Z0-9]{1,32}")) {
++            return;
++        }
++        String nonce = fields[0];
++        if (maxFocusDiopters <= 0 && !"auto".equals(fields[1])) {
++            writeFocusState(nonce + " error fixed-lens");
++            return;
++        }
++        try {
++            switch (fields[1]) {
++                case "auto":
++                    requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
++                    requestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, null);
++                    setRepeatingRequest(currentSession, requestBuilder.build());
++                    writeFocusState(nonce + " auto " + maxFocusDiopters);
++                    break;
++                case "lock":
++                    if (lastFocusDiopters == null) {
++                        writeFocusState(nonce + " error no-focus-result");
++                        return;
++                    }
++                    setManualFocus(lastFocusDiopters);
++                    writeFocusState(nonce + " manual " + lastFocusDiopters + " " + maxFocusDiopters);
++                    break;
++                case "manual":
++                    if (fields.length != 3) {
++                        writeFocusState(nonce + " error invalid-command");
++                        return;
++                    }
++                    float percent = Float.parseFloat(fields[2]);
++                    if (!Float.isFinite(percent) || percent < 0 || percent > 200) {
++                        writeFocusState(nonce + " error out-of-range");
++                        return;
++                    }
++                    float diopters = maxFocusDiopters * percent / 100;
++                    setManualFocus(diopters);
++                    writeFocusState(nonce + " manual " + diopters + " " + maxFocusDiopters);
++                    break;
++                default:
++                    writeFocusState(nonce + " error invalid-command");
++            }
++        } catch (CameraAccessException | IllegalArgumentException e) {
++            writeFocusState(nonce + " error camera-rejected");
++            Ln.w("Could not set focus: " + e.getMessage());
++        }
++    }
++
++    private void setManualFocus(float diopters) throws CameraAccessException {
++        requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
++        requestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, diopters);
++        setRepeatingRequest(currentSession, requestBuilder.build());
++    }
++
+     public void setTorchEnabled(boolean enabled) {
+         cameraHandler.post(() -> {
+             assertCameraThread();

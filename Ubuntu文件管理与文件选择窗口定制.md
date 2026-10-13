@@ -1,6 +1,6 @@
 # Ubuntu 文件管理与文件选择窗口定制：换机复现文档
 
-记录日期：2026-10-12。本文件包含完整源码；把这一份 Markdown 交给新机器上的 ChatGPT，即可按文档重建，无需原机器上的二进制文件或临时工作目录。
+记录日期：2026-10-12；更新日期：2026-10-13（增加复制绝对路径）。本文件包含完整源码；把这一份 Markdown 交给新机器上的 ChatGPT，即可按文档重建，无需原机器上的二进制文件或临时工作目录。
 
 ## 1. 要达到的效果
 
@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | Ubuntu“文件”（Nautilus）的文件夹空白处右键 | 一级菜单直接显示“新建文档”，没有二级菜单；创建空白、无后缀的文件 | 空白模板 + Nautilus 原生模板动作 + GResource 菜单覆盖 |
 | 文件夹空白处或文件夹上右键 | 显示打开 Terminator 的菜单，在相应目录启动 Terminator | `nautilus-open-any-terminal` 扩展 |
+| 选中文件或文件夹后右键 | 主菜单显示“复制绝对路径”，复制结果包含选中对象本身；多选时每行一个 | 自定义 Nautilus Python 菜单扩展 |
 | 应用的“打开文件”窗口顶部目录栏 | 单击目录栏即可编辑完整路径；输入目录路径并按 Enter 进入目录；输入文件路径并按 Enter 将文件交给当前应用 | 自编译 GTK 3 模块 + GNOME 文件选择 portal 使用 GTK 后端 |
 
 “打开文件”指完成当前应用的文件选择操作，例如打开编辑器文档或选中附件。文件选择窗口的“保存文件”模式保持原生行为。此方案没有修改全局 `Ctrl+Alt+T` 快捷键。
@@ -16,7 +17,7 @@
 
 ## 2. 可以直接交给 ChatGPT 的任务说明
 
-> 请在当前 Ubuntu GNOME 桌面上，按本文件实现第 1 节的三项效果。先确认发行版、Nautilus/GTK 版本、当前桌面用户和真实 XDG 目录，再提取文末源码，安装、配置并验证。不要把旧机器的用户名 guga、`/data/Templates`、UID 1000 或 x86_64 路径硬编码到新机器。自编写的软件安装到 `/opt/nautilus-direct-document` 和 `/opt/gtk-path-entry`；apt 软件采用系统默认目录。用户设置必须以当前桌面用户执行。保留现有模板和无关配置，保留首次修改前的备份。完成后测试中文和含空格的路径，并清理自己产生的测试进程和临时目录。若版本不兼容，先适配源码并验证，不要直接修改系统 Nautilus/GTK 二进制。只有三项验收全部通过后，才报告完成。
+> 请在当前 Ubuntu GNOME 桌面上，按本文件实现第 1 节的四项效果。先确认发行版、Nautilus/GTK 版本、当前桌面用户和真实 XDG 目录，再提取文末源码，安装、配置并验证。不要把旧机器的用户名 guga、`/data/Templates`、UID 1000 或 x86_64 路径硬编码到新机器。自编写的软件安装到 `/opt/nautilus-direct-document` 和 `/opt/gtk-path-entry`；apt 软件采用系统默认目录。用户设置必须以当前桌面用户执行。保留现有模板和无关配置，保留首次修改前的备份。完成后测试中文和含空格的路径，并清理自己产生的测试进程和临时目录。若版本不兼容，先适配源码并验证，不要直接修改系统 Nautilus/GTK 二进制。只有四项验收全部通过后，才报告完成。
 
 ## 3. 已验证的环境与限制
 
@@ -66,9 +67,9 @@ import re
 source = Path(os.environ['REPRO_DOC']).read_text()
 output = Path(os.environ['REPRO_TASK_DIR'])
 files = dict(re.findall(r'<!-- source-file: ([a-zA-Z0-9_.-]+) -->\n```(?:python|c)\n(.*?)\n```', source, re.S))
-expected = {'launcher.py', 'configure-nautilus.py', 'path-entry.c', 'user-settings.py'}
+expected = {'launcher.py', 'configure-nautilus.py', 'path-entry.c', 'user-settings.py', 'copy_absolute_path.py'}
 if set(files) != expected:
-    raise SystemExit('文档源码块不完整，请检查文末四个附录。')
+    raise SystemExit('文档源码块不完整，请检查文末五个附录。')
 for name, code in files.items():
     (output / name).write_text(code + '\n')
     print('已提取：', output / name)
@@ -169,6 +170,44 @@ new-tab=false
 
 单独修改 `x-terminal-emulator` 的 alternatives 无法替换原 GNOME Terminal 扩展的菜单，因此不能用设置默认终端代替此步骤。全局快捷键属于另一项配置，不在本文复现范围内。
 
+## 6.1 选中文件或文件夹后复制绝对路径
+
+新增一级右键菜单“复制绝对路径”。例如选中 `c.urdf` 后复制 `/home/aaa/bbb/c.urdf`，而不是它的父目录；选中文件夹后复制包含该文件夹名称的路径。复制为纯文本，不加引号，不转换成 `file://` URI，也不编码中文、空格或 `%`。多选时每个路径一行；符号链接复制当前选中链接的路径，不解析为目标路径。没有本地路径的远程 URI 不显示此项。
+
+完整源码在附录 E，已包含在第 4 节的自动提取中。它使用现有 `python3-nautilus`，不需要额外终端剪贴板工具，Wayland 和 X11 都通过 GDK 剪贴板接口复制。
+
+如果已经完成第 5 节，`/opt/nautilus-direct-document` 已存在并由桌面用户管理。如果只复现本项，也需要 Nautilus 4/GTK 4、`python3-nautilus` 和 `gir1.2-nautilus-4.0`，并先按第 5 节的第一条命令创建该 `/opt` 目录。随后以普通桌面用户运行：
+
+```bash
+python3 - <<'PYCODE'
+from pathlib import Path
+import os
+import shutil
+source = Path(os.environ['REPRO_TASK_DIR']) / 'copy_absolute_path.py'
+target = Path('/opt/nautilus-direct-document/copy_absolute_path.py')
+share = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share')))
+entry = share / 'nautilus-python/extensions/copy_absolute_path.py'
+if target.exists() and target.read_bytes() != source.read_bytes():
+    raise SystemExit('已有同名扩展源码，请先备份检查，未覆盖。')
+if entry.is_symlink():
+    if entry.readlink() != target:
+        raise SystemExit('扩展入口已被其他文件占用，未覆盖。')
+elif entry.exists():
+    raise SystemExit('扩展入口已被其他文件占用，未覆盖。')
+shutil.copyfile(source, target)
+target.chmod(0o644)
+entry.parent.mkdir(parents=True, exist_ok=True)
+if not entry.is_symlink():
+    entry.symlink_to(target)
+print('源码已安装到：', target)
+print('Nautilus 扩展入口：', entry)
+PYCODE
+```
+
+软件源码在 `/opt`；用户扩展目录只放一个软链接，保留其中其他扩展。按第 8 节安全重启 Nautilus 后菜单生效；不要在复制/移动文件进行中退出文件管理器。
+
+实现使用 [Nautilus MenuProvider](https://gnome.pages.gitlab.gnome.org/nautilus-python/nautilus-python-overview-example.html) 提供选中对象的菜单，使用 [Gio.File.get_path](https://docs.gtk.org/gio/method.File.get_path.html) 取得本地绝对路径，包含对象本身。调用 GDK 剪贴板后，由正在运行的 Nautilus 提供文本给其他应用，不会启动驻留的 `xclip`/`wl-copy` 测试进程。
+
 ## 7. 文件选择窗口：单击目录栏编辑路径
 
 先编译附录 C 的源码：
@@ -244,7 +283,7 @@ GNOME 46 的 `org.gnome.SettingsDaemon.XSettings.service` 禁止手动启动/停
 
 ## 8. 使 Nautilus 新启动入口生效
 
-完成第 5、6 节后，已有的 Nautilus 进程必须退出并经启动器重新启动。先等文件复制、移动等任务结束，可查询：
+完成第 5、6、6.1 节后，已有的 Nautilus 进程必须退出并经启动器重新启动。先等文件复制、移动等任务结束，可查询：
 
 ```bash
 gdbus call --session --dest org.gnome.Nautilus --object-path /org/gnome/Nautilus \
@@ -272,6 +311,8 @@ gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/
 /opt/nautilus-direct-document/launcher.py --new-window
 ```
 
+自动化恢复目录时，可通过会话 D-Bus 的 `org.freedesktop.Application.Open` 向 `/org/gnome/Nautilus` 传入 URI 列表，由会话服务激活启动器。重启后再次读取 `OpenWindowsWithLocations`，核对记录的目录确实已经恢复；仅取得 D-Bus 服务名不能证明窗口已打开。
+
 关闭此前打开的文件选择窗口，再重新打开。portal 客户端若仍缓存旧后端，重启该应用或注销登录。
 
 ## 9. 验收与排查
@@ -286,6 +327,10 @@ gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/
 | 点击“新建文档” | 创建 0 字节文件，无 `.txt` 等后缀；原生重命名/重名处理可用 |
 | 再次创建 | 按 Nautilus 原生规则处理重名，不覆盖首次文件 |
 | 在中文、含空格目录右键打开 Terminator | Terminator 启动；其中 `pwd` 输出对应目录 |
+| 选中文件后右键“复制绝对路径”，粘贴到文本框 | 完整绝对路径，包含文件名和后缀，例如 `/home/aaa/bbb/c.urdf` |
+| 选中文件夹后复制 | 路径包含选中文件夹名称，不只是父目录 |
+| 多选文件/目录后复制 | 每行一个完整路径；中文、空格、`%` 保留原样 |
+| 选中符号链接后复制 | 得到链接本身的绝对路径 |
 | “打开文件”窗口单击顶部路径栏 | 显示当前完整路径，输入框获得焦点并选中内容 |
 | 输入真实目录绝对路径，不加末尾 `/`，按 Enter | 进入该目录，窗口继续用于选择文件 |
 | 输入真实文件绝对路径，按 Enter | 原生 Open/Accept 确认该文件，由调用应用接收 |
@@ -320,6 +365,8 @@ Nautilus 验证时查看实际会话进程的 `/proc/<PID>/environ` 中是否有
 
 本文件新增的配置/恢复脚本另在隔离临时 XDG 目录、内存 GSettings 中验证过：重复安装不覆盖首次备份，已有模板保留，GTK 主题/模块/注释及其他 portal 路由保留，能恢复原用户文件和原终端选择。本文件的源码块已重新提取，并通过 Python 语法检查、GTK 编译及全部 Bash 命令块的语法检查。换机仍须执行 9.1 的实际验收，因为新版本、客户端和会话缓存可能不同。
 
+2026-10-13 新增扩展也已在隔离 Xvfb/D-Bus 中验证：真实 Nautilus 选中文件后的菜单出现该项，点击后另一进程读取剪贴板，得到包含中文、空格和 `%` 的完整文件路径；文件夹、多选及符号链接的剪贴板结果均通过验证。安装采用的软链接入口也在真实 Nautilus 中加载成功。
+
 ### 9.4 清理测试后台和临时文件
 
 结束自己启动的 Xvfb、测试 D-Bus、测试 Nautilus/Terminator 和测试应用，移除隔离运行目录及测试文件。只清理本次测试创建的进程，不要终止用户原有窗口或正常 portal 服务。
@@ -337,7 +384,27 @@ esac
 
 ## 10. 恢复原行为
 
-先等文件任务结束、关闭文件选择窗口。恢复当前用户的配置（普通用户执行）：
+先等文件任务结束、关闭文件选择窗口。
+
+如果安装了复制路径扩展，先移除它的用户入口。只删除指向本方案源码的软链接：
+
+```bash
+python3 - <<'PYCODE'
+from pathlib import Path
+import os
+share = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share')))
+entry = share / 'nautilus-python/extensions/copy_absolute_path.py'
+if entry.is_symlink() and entry.readlink() == Path('/opt/nautilus-direct-document/copy_absolute_path.py'):
+    entry.unlink()
+    print('已移除复制绝对路径菜单入口，重启 Nautilus 后生效。')
+elif entry.exists() or entry.is_symlink():
+    raise SystemExit('入口后来有修改，已保留，请人工检查。')
+PYCODE
+```
+
+源码可暂时保留在 `/opt`，不影响关闭该扩展。只恢复此功能时移除这个入口，然后按第 8 节重启 Nautilus即可；无需修改另外三项功能。
+
+恢复其余定制的当前用户配置（普通用户执行）：
 
 ```bash
 python3 /opt/nautilus-direct-document/configure-nautilus.py restore
@@ -390,7 +457,7 @@ sudo apt-get install nautilus-extension-gnome-terminal nautilus-extension-any-te
 - [GNOME 46 GTK 模块注册源码](https://raw.githubusercontent.com/GNOME/gnome-settings-daemon/46.0/plugins/xsettings/gsd-xsettings-gtk.c)：描述文件发现及模块发布。
 - [portal 路由配置文档](https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html)：按接口指定文件选择后端。
 
-下面四段是本文件的完整配套源码。A、C 来自已通过实际 UI 测试的实现；B、D 为换机复现整理的可移植配置及恢复工具。后续更新代码时，要同步更新安装说明并重新验证。
+下面五段是本文件的完整配套源码。A、C、E 来自已通过实际 UI 测试的实现；B、D 为换机复现整理的可移植配置及恢复工具。后续更新代码时，要同步更新安装说明并重新验证。
 
 ## 附录 A：Nautilus 启动器
 
@@ -899,4 +966,44 @@ def main():
 
 if __name__ == '__main__':
     main()
+```
+
+## 附录 E：复制选中对象的绝对路径
+
+<!-- source-file: copy_absolute_path.py -->
+```python
+"""Copy selected Nautilus files' own absolute local paths as plain text."""
+import gi
+
+gi.require_version('Nautilus', '4.0')
+gi.require_version('Gdk', '4.0')
+from gi.repository import Gdk, GObject, Nautilus
+
+
+class CopyAbsolutePath(GObject.GObject, Nautilus.MenuProvider):
+    def get_file_items(self, files):
+        if not files:
+            return []
+        paths = []
+        for file_info in files:
+            path = file_info.get_location().get_path()
+            if path is None:
+                # A remote URI has no absolute local filesystem path.
+                return []
+            paths.append(path)
+        item = Nautilus.MenuItem(
+            name='CopyAbsolutePath::Copy',
+            label='复制绝对路径',
+            tip='复制选中文件或文件夹本身的完整路径；多选时每行一个',
+        )
+        item.connect('activate', self._copy_paths, '\n'.join(paths))
+        return [item]
+
+    def get_background_items(self, current_folder):
+        return []
+
+    def _copy_paths(self, item, text):
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.get_clipboard().set(text)
 ```

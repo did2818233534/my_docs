@@ -1,6 +1,6 @@
 # Ubuntu 手机当摄像头：USB 连接、后台运行与画面方向
 
-记录日期：2026-10-12；更新日期：2026-10-13。适用环境：Ubuntu 桌面系统 + 支持 USB 调试的 Android 手机；本次验证环境为 Ubuntu 24.04.4 LTS（x86_64）、Android 15、scrcpy 5.0.1。
+记录日期：2026-10-12；更新日期：2026-10-14。适用环境：Ubuntu 桌面系统 + 支持 USB 调试的 Android 手机；本次验证环境为 Ubuntu 24.04.4 LTS（x86_64）、Android 15、scrcpy 5.0.1。
 
 本文用于换机后复现：手机通过 USB 提供真实摄像头画面，Ubuntu 应用通过标准摄像头接口使用。手动运行 `phone-webcam connect` 后在后台持续采集，不显示视频预览窗口；运行 `phone-webcam disconnect` 或拔掉 USB 后停止。**默认后置镜头、竖屏正向、不镜像，优先采集 1920×1080，输出 1080×1920。**
 
@@ -15,15 +15,16 @@
 1. 通过 USB 使用 Android 手机摄像头，让普通摄像头应用可以选择 Android USB Camera。
 2. 使用 phone-webcam connect 手动启动，phone-webcam disconnect 断开，status 查询状态，resolutions 查询当前镜头支持的分辨率编号。
 3. 启动后无预览窗口，后台持续运行，关闭启动它的终端不影响采集；拔掉 USB 后停止，不自动重连。
-4. 默认竖屏正向、不镜像、自动对焦；支持横屏、倒置、左右镜像、按编号选择分辨率，以及查询、锁定、手动设置、恢复自动对焦。connect 必须检查实际收到的画面后报告成功。
+4. 默认竖屏正向、不镜像、自动对焦、自动曝光，闪光灯关闭；支持横屏、倒置、左右镜像、按编号选择分辨率，以及查询、锁定、手动设置、恢复自动对焦和曝光。connect 必须检查实际收到的画面后报告成功。
 5. --help 和子命令帮助使用中文，表格按终端显示宽度对齐，正常内容适合 80 列终端。
 6. 如果我使用 BigCam，让这个手机来源出现在普通摄像头列表中，保留对 BigCam 自己的虚拟输出设备的过滤。
+7. 闪光灯只在手动 flash on 后常亮，flash off 关闭。exposure off/lock 关闭自动曝光并固定当前值，set 以该基准按百分比调整，on/auto 恢复自动曝光；compensation 在自动模式下按 EV 调节。
 
 执行要求：
 1. 先检查实际 Ubuntu 版本、CPU 架构、内核、现有 ADB/scrcpy、USB 授权、V4L2 设备和 systemd 用户会话。不能假定用户名、手机序列号、分辨率编号、镜头 ID 或内核版本与记录相同。
 2. 软件本体安装到 /opt/scrcpy；默认装进主目录的软件改放 /opt/软件名。复用已有合适版本，不清空已有软件目录。
 3. 优先使用当前内核已有的签名 v4l2loopback 模块。确实缺少时才安装匹配的内核头文件和兼容模块；遇到 Secure Boot 或新内核问题，诊断原因，不默认关闭安全启动。
-4. 使用本文附录 A 的完整脚本。对焦控制还依赖同仓库的 `phone-webcam-focus-server.patch`，先按第 4 节构建并安装定制的 scrcpy 手机端服务；只有脚本、没有手机端补丁时，对焦命令不能工作。ADB 默认复用 scrcpy 静态包内的 /opt/scrcpy/adb；已有兼容 ADB 时也可调整常量。不要重启或杀死无关 ADB 会话。
+4. 使用本文附录 A 的完整脚本。对焦、曝光和闪光灯控制还依赖同仓库的 `phone-webcam-focus-server.patch`，先按第 4 节构建并安装定制的 scrcpy 手机端服务；只有脚本、没有手机端补丁时，这些命令不能工作。ADB 默认复用 scrcpy 静态包内的 /opt/scrcpy/adb；已有兼容 ADB 时也可调整常量。不要重启或杀死无关 ADB 会话。
 5. 不添加开机启动、登录启动、USB 插入触发、永久启用的服务、自动重连或模块自动加载配置。只在 connect 时按需加载模块和创建临时用户服务。
 6. 写入前备份已有脚本和要修改的 BigCam 文件。若 /dev/video10 已属于其他设备，选择空闲编号并统一调整脚本，不能覆盖原设备。
 7. 切换分辨率或横竖屏前释放摄像头读取应用；应用仍占用且输出尺寸要改变时，报错并保留原连接。错误编号和冲突参数也不能破坏原连接。
@@ -49,6 +50,8 @@
 | 摄像头设备 | `/dev/video10`，`exclusive_caps=1` |
 | 后台服务 | 手动创建的临时用户服务 `phone-webcam.service`，`Restart=no` |
 | 对焦控制 | 默认自动；脚本与定制的 scrcpy 手机端服务配合，支持 `focus status/lock/set/auto` |
+| 曝光控制 | 默认自动；支持 `exposure status/off/lock/set/on/auto/compensation`，反馈实际曝光时间与 ISO |
+| 闪光灯 | 默认关闭；`flash on` 在采集期间持续照明，`flash off` 关闭；重连默认关闭 |
 | 默认连接 | 后置、1920×1080 采集、1080×1920 输出、请求 30 FPS、竖屏正向、不镜像 |
 | 停止方式 | 手动 `disconnect` 或 USB 断开；不自动重连 |
 | BigCam | 4.5.0，针对这个手机来源增加一项检测例外 |
@@ -166,9 +169,9 @@ sudo modprobe v4l2loopback devices=1 video_nr=10 \
 
 它不是开机配置。**不创建** `/etc/modules-load.d/`、udev 热插拔、桌面自启动或永久服务文件；如果安装包新增了自动加载配置，应查明来源并按本次“只手动启动”的目标调整，保留原配置备份。
 
-## 4. 部署 phone-webcam 脚本和对焦服务
+## 4. 部署 phone-webcam 脚本和相机控制服务
 
-附录 A 给出了当前 CLI 的完整源码。可将其保存为 `/opt/scrcpy/phone-webcam`，权限 `755`，再创建入口链接。基础摄像头转接使用 scrcpy 5.0.1；**对焦控制额外依赖定制的 scrcpy 手机端服务**。同仓库的 [`phone-webcam-focus-server.patch`](phone-webcam-focus-server.patch) 是基于 scrcpy 5.0.1 的 `CameraCapture.java` 改动，包含 Camera2 对焦控制和实际镜头位置反馈；不能只更新 Python 脚本便认为对焦已可用。
+附录 A 给出了当前 CLI 的完整源码。可将其保存为 `/opt/scrcpy/phone-webcam`，权限 `755`，再创建入口链接。基础摄像头转接使用 scrcpy 5.0.1；**对焦、曝光和闪光灯控制额外依赖定制的 scrcpy 手机端服务**。同仓库的 [`phone-webcam-focus-server.patch`](phone-webcam-focus-server.patch) 保留原文件名，已包含 Camera2 对焦、曝光、闪光灯控制和实际采集结果反馈；不能只更新 Python 脚本便认为这些功能已可用。
 
 在另一台机器复现对焦功能时，应从 scrcpy 5.0.1 源码按官方构建说明准备 Android 构建环境，在源码根目录应用该补丁并构建手机端 `scrcpy-server`，先备份原 `/opt/scrcpy/scrcpy-server`，再安装构建产物。补丁只适用于相符的源码版本；若 `git apply --check` 失败，应检查版本，不要强行套用。可先检查：
 
@@ -304,6 +307,48 @@ phone-webcam focus auto     # 恢复默认自动对焦
 `set` 接受 0–200 的百分比，0 对应远处，数值越大越靠近镜头。百分比以手机报告的对焦距离上限为 100% 计算，**不是画面的变焦倍数**。状态同时区分“设定值”和手机返回的“实际位置”。超出镜头可达范围时，即使命令被接受，也可能停在较低的实际位置。
 
 本机后置镜头实测：自动对焦曾显示超过 100%；手动设为 120% 时，手机回报约 128.2%；设为 200% 时仍约 128.2%。这只说明这台手机当前镜头与固件的实测行为，不能保证其他镜头达到同样位置。要回到原来的自动对焦，运行 `phone-webcam focus auto`。
+
+### 闪光灯持续照明
+
+每次连接默认关闭闪光灯。只有手动开启才会在相机采集期间持续照明；关闭或断开后停止，重新连接仍默认关闭。前置等没有闪光灯的镜头会明确报告不支持。
+
+```bash
+phone-webcam flash status
+phone-webcam flash on
+phone-webcam flash off
+```
+
+也可用 `torch` 替代 `flash`，例如 `phone-webcam torch on`。该功能设置 Camera2 的 `FLASH_MODE_TORCH`，用于常亮照明。
+
+### 自动曝光与手动曝光
+
+默认开启自动曝光，补偿为 0 EV。曝光命令沿用对焦的操作方式；开关可用 `on/off`，也可用 `auto/lock`：
+
+```bash
+phone-webcam exposure status
+phone-webcam exposure off       # 关闭自动曝光，固定当前曝光值
+phone-webcam exposure lock      # 与 off 相同
+phone-webcam exposure set 50    # 基准曝光量的 50%，更暗
+phone-webcam exposure set 200   # 基准曝光量的 200%，更亮
+phone-webcam exposure on        # 恢复自动曝光，并清零 EV 补偿
+phone-webcam exposure auto      # 与 on 相同
+```
+
+`set` 输入范围为 0–200%，100% 代表从自动切换为手动时的基准曝光量，按曝光时间 × ISO 计算。连续执行 `set` 使用同一个基准，因此从 50 改为 200 得到基准的两倍；`lock/off` 会将当前实际值重新固定为新的 100% 基准。命令通过 Camera2 关闭自动曝光，然后调整曝光时间和必要的 ISO；对焦和闪光灯设置独立保留。
+
+曝光时间受手机范围和当前帧率限制，达不到目标时以实际反馈为准。0% 会落到硬件最小曝光值，不能保证完全黑。状态会显示设定百分比、实际百分比、曝光时间（毫秒）和 ISO。
+
+若希望保留自动曝光，只改变其亮度目标，可使用 EV 补偿：
+
+```bash
+phone-webcam exposure compensation 1    # 自动曝光，调亮 1 EV
+phone-webcam exposure compensation -1   # 自动曝光，调暗 1 EV
+phone-webcam exposure auto              # 自动曝光，补偿恢复为 0 EV
+```
+
+补偿命令会开启自动曝光；EV 按手机支持的步长取最近值，超范围报错并保留原设置。本机后置支持 −4 到 +4 EV，步长为 1/6 EV；其他手机以 `exposure status` 报告为准。
+
+2026-10-14 实测：锁定后基准约 5.824 ms、ISO 50；50% 回报约 2.912 ms、ISO 50；200% 回报约 11.648 ms、ISO 50。自动曝光开关、±1 EV 补偿均通过，开启闪光灯时采集结果回报 `FLASH_MODE_TORCH` 和 `FLASH_STATE_FIRED`。测试结束后关闭闪光灯、恢复自动曝光，并恢复原来的采集方向和固定对焦。
 
 ## 6. BigCam 选择摄像头和普通摄像头分类
 
@@ -503,10 +548,11 @@ scrcpy、ADB 或 `v4l2loopback` 可能被其他用途使用，不因为移除 CL
 | 帮助排版 | 按显示列宽对齐；全局和连接帮助正常内容在 80 列内 |
 | 无 GUI、手动后台服务 | 配置与运行进程已检查，使用 `--no-window`，无自动启用的单元 |
 | 对焦控制 | 定制手机端服务与脚本已实测；默认自动、手动设定、实际位置反馈和恢复自动可用；输入 120%、200% 后实际约 128.2% |
+| 闪光灯和曝光 | 后置常亮开关、自动曝光开关、50%/200% 手动曝光和 ±1 EV 补偿已实测；错误范围不破坏原设置 |
 | 新机器实际拔线/关闭终端、长期使用 | 换机后仍需按第 7 节实际验收，不能用本机结果替代 |
 | 最高分辨率、锁屏省电、所有应用兼容性 | 未全部实测，不作保证 |
 
-附录源码与当前安装脚本保持一致。对焦功能还须安装同仓库补丁构建的手机端服务；再次部署后应以新机器实际检查为准。
+附录源码与当前安装脚本保持一致。对焦、曝光和闪光灯功能还须安装同仓库补丁构建的手机端服务；再次部署后应以新机器实际检查为准。
 
 ## 参考资料
 
@@ -516,6 +562,7 @@ scrcpy、ADB 或 `v4l2loopback` 可能被其他用途使用，不因为移除 CL
 - [v4l2loopback 官方项目](https://github.com/v4l2loopback/v4l2loopback)
 - [systemd-run 临时服务说明](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html)
 - [Android Camera2 `LENS_FOCUS_DISTANCE` 说明](https://developer.android.com/reference/android/hardware/camera2/CaptureRequest#LENS_FOCUS_DISTANCE)
+- [Android Camera2 自动曝光和闪光灯请求参数](https://developer.android.com/reference/android/hardware/camera2/CaptureRequest)
 
 ## 附录 A：完整脚本
 
@@ -777,6 +824,87 @@ def focus(mode, percent=None):
     raise CameraError("对焦命令超时，请检查手机端摄像头是否仍在运行。")
 
 
+def camera_control_state(kind, serial, camera_id):
+    result = run([ADB, "-s", serial, "shell", "cat",
+                  f"/data/local/tmp/scrcpy-{kind}-state-{camera_id}"], timeout=4)
+    fields = result.stdout.strip().split()
+    modes = ("on", "off") if kind == "torch" else ("auto", "manual")
+    if result.returncode != 0 or len(fields) < 2 or fields[1] not in modes:
+        raise CameraError("手机端尚未提供此控制，请安装匹配的手机端服务并重新连接。")
+    values = dict(field.split("=", 1) for field in fields[2:] if "=" in field)
+    return fields[0], fields[1], values
+
+
+def show_camera_control(kind, mode, values):
+    if kind == "torch":
+        if values.get("available") == "0":
+            print("闪光灯：当前镜头没有闪光灯。")
+            return
+        actual = values.get("flash")
+        state = "开" if actual == "2" else "关" if actual is not None else "尚未反馈"
+        print(f"闪光灯：{'开' if mode == 'on' else '关'}；手机实际：{state}（开启时持续照明）。")
+        return
+    actual = "尚未取得曝光时间和 ISO，请稍后查询"
+    if "time" in values and "iso" in values:
+        actual = f"曝光时间 {float(values['time']) / 1e6:.3f} ms，ISO {values['iso']}"
+    if mode == "auto":
+        print(f"自动曝光：开；{actual}；补偿 {float(values.get('ev', 0)):+.2f} EV。")
+    else:
+        percent = float(values.get("requested", 100))
+        measured = ""
+        if "time" in values and "iso" in values and "baseTime" in values and "baseIso" in values:
+            base = float(values["baseTime"]) * float(values["baseIso"])
+            measured = f"实际约 {float(values['time']) * float(values['iso']) / base * 100:.1f}%；" if base > 0 else ""
+        print(f"自动曝光：关；设定 {percent:g}%；{measured}{actual}。")
+        if values.get("ae") != "0":
+            print("手机尚未反馈自动曝光关闭，请稍后重新查询。")
+    if values.get("supported") == "0":
+        print("当前镜头不支持手动曝光。")
+    if "minEv" in values:
+        print(f"自动曝光补偿范围：{float(values['minEv']):g} 到 {float(values['maxEv']):g} EV。")
+
+
+def camera_control(kind, operation, value=None):
+    if not active():
+        raise CameraError("摄像头尚未连接，请先运行 phone-webcam connect。")
+    _, options = current_config()
+    serial, camera_id = options.get("serial", ""), options.get("camera-id", "")
+    if not serial or not re.fullmatch(r"[a-zA-Z0-9_-]+", camera_id):
+        raise CameraError("无法识别当前手机或摄像头。")
+    _, mode, values = camera_control_state(kind, serial, camera_id)
+    if operation == "status":
+        show_camera_control(kind, mode, values)
+        return
+    nonce = secrets.token_hex(6)
+    argument = f" {value:g}" if value is not None else ""
+    path = f"/data/local/tmp/scrcpy-{kind}-command-{camera_id}"
+    command = f"{nonce} {operation}{argument}"
+    result = run([ADB, "-s", serial, "shell", f"printf '%s\\n' '{command}' > {path}"], timeout=4)
+    if result.returncode != 0:
+        raise CameraError("发送控制命令失败，请检查 USB 连接。")
+    submitted_at = time.monotonic()
+    deadline = submitted_at + 5
+    messages = {"no-flash": "当前镜头没有闪光灯。",
+                "no-manual-exposure": "当前镜头不支持手动曝光。",
+                "no-exposure-result": "尚未取得自动曝光值，请稍等再试。",
+                "no-compensation": "当前镜头不支持曝光补偿。",
+                "out-of-range": "参数超出手机支持范围，请运行 exposure status 查看。",
+                "camera-rejected": "摄像头拒绝了设置，原设置已保留。"}
+    while time.monotonic() < deadline:
+        token, mode, values = camera_control_state(kind, serial, camera_id)
+        if token == nonce:
+            if "error" in values:
+                reason = values["error"]
+                raise CameraError(messages.get(reason, "控制命令无效：" + reason))
+            confirmed = (values.get("flash") == ("2" if operation == "on" else "0")
+                         if kind == "torch" else values.get("ae") == ("0" if mode == "manual" else "1"))
+            if confirmed and values.get("applied") == nonce and time.monotonic() - submitted_at >= 0.7:
+                show_camera_control(kind, mode, values)
+                return
+        time.sleep(0.15)
+    raise CameraError("手机未确认设置，请运行 status 查询实际状态。")
+
+
 def ready(expected):
     deadline = time.monotonic() + 12
     while time.monotonic() < deadline and active():
@@ -867,6 +995,12 @@ def make_parser():
                                ("phone-webcam focus lock", "锁定当前自动对焦位置"),
                                ("phone-webcam focus set 120", "手动设置对焦位置，可输入 0 到 200"),
                                ("phone-webcam focus auto", "恢复自动对焦"),
+                               ("phone-webcam flash on", "开启闪光灯持续照明，off 关闭"),
+                               ("phone-webcam exposure status", "查询自动曝光与实际曝光值"),
+                               ("phone-webcam exposure lock", "关闭自动曝光，固定当前值"),
+                               ("phone-webcam exposure set 50", "基准曝光的 50%，可输入 0 到 200"),
+                               ("phone-webcam exposure auto", "恢复自动曝光，也可用 on"),
+                               ("phone-webcam exposure compensation 1", "保持自动曝光，增加 1 EV"),
                                ("phone-webcam disconnect", "断开摄像头"),
                            ]) + "\n\n" + """连接会检查实际画面并报告结果；日志保留在后台，关闭终端不会断开。
 不添加自动启动；拔掉 USB 后停止。切换编号会重新连接。
@@ -896,6 +1030,21 @@ def make_parser():
     focus_commands.add_parser("auto", help="恢复自动对焦")
     focus_set = focus_commands.add_parser("set", help="手动设置对焦位置，0 为远处；实际位置以手机反馈为准")
     focus_set.add_argument("position", type=float, metavar="0-200", help="焦点位置百分比")
+    flash_parser = commands.add_parser("flash", aliases=["torch"], help="开关闪光灯持续照明，默认关闭")
+    flash_parser.add_argument("flash_command", choices=["status", "on", "off"], metavar="status|on|off",
+                              help="status 查询；on 开启；off 关闭")
+    exposure_parser = commands.add_parser("exposure", help="查询或调整曝光，默认自动曝光",
+        epilog="set 的 100% 为切换手动时的自动曝光基准，50% 更暗，200% 更亮。\n"
+               "连续 set 使用同一基准；lock 重新锁定当前值，auto 恢复自动并清零曝光补偿。\n"
+               "实际曝光受镜头能力和帧率限制；status 显示手机反馈。")
+    exposure_commands = exposure_parser.add_subparsers(dest="exposure_command", required=True, metavar="操作")
+    exposure_commands.add_parser("status", help="查询模式、实际曝光时间、ISO 和补偿范围")
+    exposure_commands.add_parser("lock", aliases=["off"], help="关闭自动曝光，固定当前曝光值")
+    exposure_commands.add_parser("auto", aliases=["on"], help="开启自动曝光并清零曝光补偿")
+    exposure_set = exposure_commands.add_parser("set", help="关闭自动曝光，按基准百分比调节曝光")
+    exposure_set.add_argument("position", type=float, metavar="0-200", help="100 为基准；数值越大越亮")
+    compensation = exposure_commands.add_parser("compensation", help="保持自动曝光，按 EV 调亮或调暗")
+    compensation.add_argument("ev", type=float, metavar="EV", help="正数更亮，负数更暗；范围见 status")
     return parser
 
 
@@ -926,6 +1075,14 @@ def main():
             raise CameraError("对焦位置应为 0 到 200；0 是远处，超出镜头能力时会停在实际可达位置。")
         focus("manual" if args.focus_command == "set" else args.focus_command,
               args.position if args.focus_command == "set" else None)
+    elif args.command in ("flash", "torch"):
+        camera_control("torch", args.flash_command)
+    elif args.command == "exposure":
+        operation = {"on": "auto", "off": "lock", "set": "manual"}.get(args.exposure_command, args.exposure_command)
+        value = args.position if operation == "manual" else args.ev if operation == "compensation" else None
+        if value is not None and (not math.isfinite(value) or (operation == "manual" and not 0 <= value <= 200)):
+            raise CameraError("曝光百分比应为 0 到 200；EV 应为有限数值，范围见 exposure status。")
+        camera_control("exposure", operation, value)
     elif args.command == "resolutions":
         show_resolutions(args.camera or "back")
     else:

@@ -1,5 +1,5 @@
 diff --git a/server/src/main/java/com/genymobile/scrcpy/video/CameraCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/CameraCapture.java
-index fb52969..e13989a 100644
+index fb52969..2240c38 100644
 --- a/server/src/main/java/com/genymobile/scrcpy/video/CameraCapture.java
 +++ b/server/src/main/java/com/genymobile/scrcpy/video/CameraCapture.java
 @@ -25,16 +25,24 @@ import android.hardware.camera2.CameraDevice;
@@ -35,7 +35,7 @@ index fb52969..e13989a 100644
  
      private final String explicitCameraId;
      private final CameraFacing cameraFacing;
-@@ -89,6 +98,13 @@ public class CameraCapture extends SurfaceCapture {
+@@ -89,6 +98,37 @@ public class CameraCapture extends SurfaceCapture {
      private boolean started;
      private CaptureRequest.Builder requestBuilder;
      private CameraCaptureSession currentSession;
@@ -46,19 +46,62 @@ index fb52969..e13989a 100644
 +    private Float lastFocusDiopters;
 +    private Float publishedFocusDiopters;
 +    private String focusStateText;
++    private File exposureStateFile;
++    private File torchStateFile;
++    private String exposureCommandName;
++    private String torchCommandName;
++    private String exposureStateText;
++    private String torchStateText;
++    private Range<Long> exposureTimeRange;
++    private Range<Integer> sensitivityRange;
++    private Range<Integer> compensationRange;
++    private float compensationStep;
++    private boolean manualExposureSupported;
++    private boolean flashAvailable;
++    private Long lastExposureTime;
++    private Integer lastSensitivity;
++    private Long lastFrameDuration;
++    private Integer lastAeMode;
++    private Integer lastFlashMode;
++    private Integer lastFlashState;
++    private String lastControlToken;
++    private Long baselineExposureTime;
++    private Integer baselineSensitivity;
++    private boolean manualExposure;
++    private float exposurePercent = 100;
++
  
      public CameraCapture(Options options) {
          this.explicitCameraId = options.getCameraId();
-@@ -306,6 +322,8 @@ public class CameraCapture extends SurfaceCapture {
+@@ -306,6 +346,17 @@ public class CameraCapture extends SurfaceCapture {
                  try {
                      CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
                      zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
 +                    Float minimumFocusDistance = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
 +                    maxFocusDiopters = minimumFocusDistance != null ? minimumFocusDistance : 0;
++                    exposureTimeRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
++                    sensitivityRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
++                    compensationRange = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
++                    android.util.Rational step = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
++                    compensationStep = step != null ? step.floatValue() : 0;
++                    int[] capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
++                    manualExposureSupported = capabilities != null && exposureTimeRange != null && sensitivityRange != null
++                            && Arrays.stream(capabilities).anyMatch(c -> c == CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
++                    flashAvailable = Boolean.TRUE.equals(characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE));
                  } catch (CameraAccessException e) {
                      Ln.w("Could not get camera characteristics");
                  }
-@@ -330,6 +348,7 @@ public class CameraCapture extends SurfaceCapture {
+@@ -317,6 +368,9 @@ public class CameraCapture extends SurfaceCapture {
+                     if (fps > 0) {
+                         requestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(fps, fps));
+                     }
++                    requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
++                    requestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
++                    requestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
+                     if (initialTorch) {
+                         Ln.i("Turn camera torch on");
+                         requestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH);
+@@ -330,6 +384,7 @@ public class CameraCapture extends SurfaceCapture {
                      CaptureRequest request = requestBuilder.build();
                      setRepeatingRequest(session, request);
                      currentSession = session;
@@ -66,7 +109,7 @@ index fb52969..e13989a 100644
                  } catch (CameraAccessException e) {
                      Ln.e("Camera error", e);
                      disconnected.set(true);
-@@ -357,6 +376,7 @@ public class CameraCapture extends SurfaceCapture {
+@@ -357,6 +412,7 @@ public class CameraCapture extends SurfaceCapture {
      public void stop() {
          cameraHandler.post(() -> {
              assertCameraThread();
@@ -74,7 +117,7 @@ index fb52969..e13989a 100644
              if (currentSession != null) {
                  try {
                      currentSession.stopRepeating();
-@@ -461,6 +481,15 @@ public class CameraCapture extends SurfaceCapture {
+@@ -461,6 +517,25 @@ public class CameraCapture extends SurfaceCapture {
              public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure) {
                  Ln.w("Camera capture failed: frame " + failure.getFrameNumber());
              }
@@ -82,6 +125,16 @@ index fb52969..e13989a 100644
 +            @Override
 +            public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
 +                lastFocusDiopters = result.get(TotalCaptureResult.LENS_FOCUS_DISTANCE);
++                lastExposureTime = result.get(TotalCaptureResult.SENSOR_EXPOSURE_TIME);
++                lastSensitivity = result.get(TotalCaptureResult.SENSOR_SENSITIVITY);
++                lastFrameDuration = result.get(TotalCaptureResult.SENSOR_FRAME_DURATION);
++                lastAeMode = result.get(TotalCaptureResult.CONTROL_AE_MODE);
++                lastFlashMode = result.get(TotalCaptureResult.FLASH_MODE);
++                lastFlashState = result.get(TotalCaptureResult.FLASH_STATE);
++                lastControlToken = request.getTag() != null ? request.getTag().toString() : "startup";
++                if (result.getFrameNumber() % 6 == 0) {
++                    publishCameraStates();
++                }
 +                if (lastFocusDiopters != null && result.getFrameNumber() % 6 == 0
 +                        && (publishedFocusDiopters == null || Math.abs(lastFocusDiopters - publishedFocusDiopters) > 0.05f)) {
 +                    publishFocusState();
@@ -90,7 +143,7 @@ index fb52969..e13989a 100644
          };
  
          if (highSpeed) {
-@@ -477,6 +506,129 @@ public class CameraCapture extends SurfaceCapture {
+@@ -477,6 +552,360 @@ public class CameraCapture extends SurfaceCapture {
          return disconnected.get();
      }
  
@@ -100,11 +153,25 @@ index fb52969..e13989a 100644
 +        focusCommandName = "scrcpy-focus-command-" + safeCameraId;
 +        focusStateFile = new File(FOCUS_DIR, "scrcpy-focus-state-" + safeCameraId);
 +        writeFocusState("startup auto " + maxFocusDiopters);
++        exposureCommandName = "scrcpy-exposure-command-" + safeCameraId;
++        torchCommandName = "scrcpy-torch-command-" + safeCameraId;
++        exposureStateFile = new File(FOCUS_DIR, "scrcpy-exposure-state-" + safeCameraId);
++        torchStateFile = new File(FOCUS_DIR, "scrcpy-torch-state-" + safeCameraId);
++        manualExposure = false;
++        baselineExposureTime = null;
++        baselineSensitivity = null;
++        exposureStateText = "startup auto";
++        torchStateText = "startup " + (initialTorch ? "on" : "off");
++        publishCameraStates();
 +        focusObserver = new FileObserver(FOCUS_DIR, FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
 +            @Override
 +            public void onEvent(int event, String path) {
 +                if (focusCommandName.equals(path)) {
 +                    cameraHandler.post(() -> processFocusCommand());
++                } else if (exposureCommandName.equals(path)) {
++                    cameraHandler.post(() -> processCameraCommand(false));
++                } else if (torchCommandName.equals(path)) {
++                    cameraHandler.post(() -> processCameraCommand(true));
 +                }
 +            }
 +        };
@@ -121,6 +188,24 @@ index fb52969..e13989a 100644
 +            focusStateFile.delete();
 +            focusStateFile = null;
 +        }
++        if (exposureStateFile != null) {
++            exposureStateFile.delete();
++            exposureStateFile = null;
++        }
++        if (torchStateFile != null) {
++            torchStateFile.delete();
++            torchStateFile = null;
++        }
++        if (exposureCommandName != null) {
++            new File(FOCUS_DIR, exposureCommandName).delete();
++            exposureCommandName = null;
++        }
++        if (torchCommandName != null) {
++            new File(FOCUS_DIR, torchCommandName).delete();
++            torchCommandName = null;
++        }
++        exposureStateText = null;
++        torchStateText = null;
 +        focusStateText = null;
 +        publishedFocusDiopters = null;
 +        if (focusCommandName != null) {
@@ -209,6 +294,205 @@ index fb52969..e13989a 100644
 +            writeFocusState(nonce + " error camera-rejected");
 +            Ln.w("Could not set focus: " + e.getMessage());
 +        }
++    }
++
++    private long exposureTimeLimit() {
++        long limit = exposureTimeRange != null ? exposureTimeRange.getUpper() : 0;
++        return fps > 0 ? Math.min(limit, 1_000_000_000L / fps) : limit;
++    }
++
++    private void writeCameraState(File file, String text) {
++        if (file == null || text == null) {
++            return;
++        }
++        File temporary = new File(file.getPath() + ".new");
++        try (FileOutputStream stream = new FileOutputStream(temporary, false)) {
++            stream.write((text + "\n").getBytes(StandardCharsets.US_ASCII));
++        } catch (IOException e) {
++            Ln.w("Could not write camera state: " + e.getMessage());
++            return;
++        }
++        if (!temporary.renameTo(file)) {
++            temporary.delete();
++        }
++    }
++
++    private void publishCameraStates() {
++        String exposure = exposureStateText;
++        if (exposure != null) {
++            exposure += " supported=" + (manualExposureSupported ? 1 : 0)
++                    + " requested=" + exposurePercent;
++            if (lastExposureTime != null) {
++                exposure += " time=" + lastExposureTime;
++            }
++            if (lastSensitivity != null) {
++                exposure += " iso=" + lastSensitivity;
++            }
++            if (lastAeMode != null) {
++                exposure += " ae=" + lastAeMode;
++            }
++            if (baselineExposureTime != null && baselineSensitivity != null) {
++                exposure += " baseTime=" + baselineExposureTime + " baseIso=" + baselineSensitivity;
++            }
++            if (exposureTimeRange != null) {
++                exposure += " minTime=" + exposureTimeRange.getLower() + " maxTime=" + exposureTimeLimit();
++            }
++            if (sensitivityRange != null) {
++                exposure += " minIso=" + sensitivityRange.getLower() + " maxIso=" + sensitivityRange.getUpper();
++            }
++            if (compensationRange != null && requestBuilder != null) {
++                Integer compensation = requestBuilder.get(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION);
++                exposure += " ev=" + (compensation != null ? compensation * compensationStep : 0)
++                        + " minEv=" + compensationRange.getLower() * compensationStep
++                        + " maxEv=" + compensationRange.getUpper() * compensationStep
++                        + " evStep=" + compensationStep;
++            }
++            exposure += " applied=" + lastControlToken;
++            writeCameraState(exposureStateFile, exposure);
++        }
++        String torch = torchStateText;
++        if (torch != null) {
++            torch += " available=" + (flashAvailable ? 1 : 0);
++            if (lastFlashMode != null) {
++                torch += " flash=" + lastFlashMode;
++            }
++            if (lastFlashState != null) {
++                torch += " flashState=" + lastFlashState;
++            }
++            torch += " applied=" + lastControlToken;
++            writeCameraState(torchStateFile, torch);
++        }
++    }
++
++    private void restoreExposure(CaptureRequest previous) {
++        requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, previous.get(CaptureRequest.CONTROL_AE_MODE));
++        requestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, previous.get(CaptureRequest.CONTROL_AE_LOCK));
++        requestBuilder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, previous.get(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION));
++        requestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, previous.get(CaptureRequest.SENSOR_EXPOSURE_TIME));
++        requestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, previous.get(CaptureRequest.SENSOR_SENSITIVITY));
++        requestBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, previous.get(CaptureRequest.SENSOR_FRAME_DURATION));
++    }
++
++    private void configureAutoExposure() {
++        requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
++        requestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
++        requestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, null);
++        requestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, null);
++        requestBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, null);
++        requestBuilder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, 0);
++    }
++
++    private void processCameraCommand(boolean torch) {
++        assertCameraThread();
++        if (currentSession == null || requestBuilder == null) {
++            return;
++        }
++        String line;
++        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
++                new FileInputStream(new File(FOCUS_DIR, torch ? torchCommandName : exposureCommandName)), StandardCharsets.US_ASCII))) {
++            line = reader.readLine();
++        } catch (IOException e) {
++            return;
++        }
++        if (line == null) {
++            return;
++        }
++        String[] fields = line.trim().split(" +");
++        if (fields.length < 2 || !fields[0].matches("[a-zA-Z0-9]{1,32}")) {
++            return;
++        }
++        String nonce = fields[0];
++        CaptureRequest previous = requestBuilder.build();
++        requestBuilder.setTag(nonce);
++        String error = null;
++        try {
++            if (torch) {
++                if (fields.length != 2 || !("on".equals(fields[1]) || "off".equals(fields[1]))) {
++                    error = "invalid-command";
++                } else if (!flashAvailable && "on".equals(fields[1])) {
++                    error = "no-flash";
++                } else {
++                    requestBuilder.set(CaptureRequest.FLASH_MODE,
++                            "on".equals(fields[1]) ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
++                    setRepeatingRequest(currentSession, requestBuilder.build());
++                    torchStateText = nonce + " " + fields[1];
++                }
++            } else if ("auto".equals(fields[1]) && fields.length == 2) {
++                configureAutoExposure();
++                setRepeatingRequest(currentSession, requestBuilder.build());
++                manualExposure = false;
++                baselineExposureTime = null;
++                baselineSensitivity = null;
++                exposurePercent = 100;
++                exposureStateText = nonce + " auto";
++            } else if ("compensation".equals(fields[1]) && fields.length == 3) {
++                float ev = Float.parseFloat(fields[2]);
++                if (!Float.isFinite(ev) || compensationRange == null || compensationStep <= 0) {
++                    error = "no-compensation";
++                } else if (ev < compensationRange.getLower() * compensationStep - 0.0001
++                        || ev > compensationRange.getUpper() * compensationStep + 0.0001) {
++                    error = "out-of-range";
++                } else {
++                    configureAutoExposure();
++                    int steps = compensationRange.clamp(Math.round(ev / compensationStep));
++                    requestBuilder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, steps);
++                    setRepeatingRequest(currentSession, requestBuilder.build());
++                    manualExposure = false;
++                    baselineExposureTime = null;
++                    baselineSensitivity = null;
++                    exposureStateText = nonce + " auto";
++                }
++            } else if (("lock".equals(fields[1]) && fields.length == 2)
++                    || ("manual".equals(fields[1]) && fields.length == 3)) {
++                float percent = "lock".equals(fields[1]) ? 100 : Float.parseFloat(fields[2]);
++                if (!Float.isFinite(percent) || percent < 0 || percent > 200) {
++                    error = "out-of-range";
++                } else if (!manualExposureSupported) {
++                    error = "no-manual-exposure";
++                } else if (lastExposureTime == null || lastSensitivity == null) {
++                    error = "no-exposure-result";
++                } else {
++                    // Keep one reference through successive set commands. Lock explicitly establishes a new reference.
++                    long referenceTime = !manualExposure || "lock".equals(fields[1]) ? lastExposureTime : baselineExposureTime;
++                    int referenceIso = !manualExposure || "lock".equals(fields[1]) ? lastSensitivity : baselineSensitivity;
++                    long time = exposureTimeRange.clamp(Math.round(referenceTime * percent / 100.0));
++                    time = Math.min(time, Math.max(exposureTimeRange.getLower(), exposureTimeLimit()));
++                    double target = (double) referenceTime * referenceIso * percent / 100.0;
++                    int iso = sensitivityRange.clamp((int) Math.round(target / time));
++                    requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
++                    requestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
++                    requestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, time);
++                    requestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
++                    long frame = fps > 0 ? 1_000_000_000L / fps : lastFrameDuration != null ? lastFrameDuration : time;
++                    requestBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, Math.max(time, frame));
++                    setRepeatingRequest(currentSession, requestBuilder.build());
++                    manualExposure = true;
++                    baselineExposureTime = referenceTime;
++                    baselineSensitivity = referenceIso;
++                    exposurePercent = percent;
++                    exposureStateText = nonce + " manual";
++                }
++            } else {
++                error = "invalid-command";
++            }
++        } catch (CameraAccessException | IllegalArgumentException | IllegalStateException e) {
++            requestBuilder.set(CaptureRequest.FLASH_MODE, previous.get(CaptureRequest.FLASH_MODE));
++            restoreExposure(previous);
++            error = "camera-rejected";
++            Ln.w("Could not set camera control: " + e.getMessage());
++        }
++        if (error != null) {
++            requestBuilder.setTag(previous.getTag());
++            // Preserve the current mode and values when returning an error.
++            if (torch) {
++                Integer flash = previous.get(CaptureRequest.FLASH_MODE);
++                torchStateText = nonce + " " + (flash != null && flash == CaptureRequest.FLASH_MODE_TORCH ? "on" : "off")
++                        + " error=" + error;
++            } else {
++                exposureStateText = nonce + " " + (manualExposure ? "manual" : "auto") + " error=" + error;
++            }
++        }
++        publishCameraStates();
 +    }
 +
 +    private void setManualFocus(float diopters) throws CameraAccessException {
